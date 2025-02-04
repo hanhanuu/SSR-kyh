@@ -1,9 +1,13 @@
-# Does End-to-End Autonomous Driving Really Need Perception Tasks? 
+# Navigation-Guided Sparse Scene Representation for End-to-End Autonomous Driving
+Original title: **Dose End-to-End Autonomous Driving Really Need Perception Tasks?**
 
 ## [![arXiv](https://img.shields.io/badge/arXiv-Paper-<COLOR>.svg)](https://arxiv.org/abs/2409.18341)
 
+
 ## News
 
+- **2025.02.01** Chinese Blog of SSR available in [zhihu](https://zhuanlan.zhihu.com/p/14173403896).
+- **2025.01.23** SSR is accepted to ICLR 2025. 🎉
 - **2024.09.30** Paper of SSR available in [arxiv](https://arxiv.org/abs/2409.18341).
 
 ## Introduction
@@ -20,10 +24,15 @@ SSR consists of two parts: the purple part, which is used during both training a
 </div><br/>
 
 ## Visualization
-We visualize the results of our framework on the nuScenes dataset.
+We visualize the results of our framework on the nuScenes dataset and Carla Town05 Long benchmark.
+
+### nuScenes
 <div align="center">
   <img src="resources/vis.png" width="800"/>
 </div><br/>
+
+### Carla
+https://github.com/user-attachments/assets/5cf7825c-5c8e-442e-85d3-894f4095f6d6
 
 ## Bibtex
 If this work is helpful for your research, please consider citing the following BibTeX entry.
