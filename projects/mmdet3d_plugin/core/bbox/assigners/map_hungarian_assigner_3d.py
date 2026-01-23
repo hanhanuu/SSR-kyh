@@ -47,7 +47,25 @@ class MapHungarianAssigner3D(BaseAssigner):
                  reg_cost=dict(type='BBoxL1Cost', weight=1.0),
                  iou_cost=dict(type='IoUCost', weight=0.0),
                  pts_cost=dict(type='ChamferDistance',loss_src_weight=1.0,loss_dst_weight=1.0),
-                 pc_range=None):
+                 pc_range=None,
+                 **kwargs):
+        def _strip_keys(node, keys):
+            if isinstance(node, dict):
+                return {
+                    k: _strip_keys(v, keys)
+                    for k, v in node.items()
+                    if k not in keys
+                }
+            if isinstance(node, list):
+                return [_strip_keys(v, keys) for v in node]
+            if isinstance(node, tuple):
+                return tuple(_strip_keys(v, keys) for v in node)
+            return node
+
+        cls_cost = _strip_keys(cls_cost, {'ann_file', 'map_ann_file'})
+        reg_cost = _strip_keys(reg_cost, {'ann_file', 'map_ann_file'})
+        iou_cost = _strip_keys(iou_cost, {'ann_file', 'map_ann_file'})
+        pts_cost = _strip_keys(pts_cost, {'ann_file', 'map_ann_file'})
         self.cls_cost = build_match_cost(cls_cost)
         self.reg_cost = build_match_cost(reg_cost)
         self.iou_cost = build_match_cost(iou_cost)

@@ -3,6 +3,7 @@ from .runner import *
 from .hooks import *
 
 from .SSR import SSR
+__all__ = ['SSR']
 from .SSR_head import SSRHead
 from .tokenlearner import *
 from .SSR_transformer import SSRPerceptionTransformer, \

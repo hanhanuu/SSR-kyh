@@ -161,6 +161,25 @@ class SSRHead(DETRHead):
                  ego_lcf_feat_idx=None,
                  valid_fut_ts=6,
                  **kwargs):
+        def _strip_keys(node, keys):
+            if isinstance(node, dict):
+                return {
+                    k: _strip_keys(v, keys)
+                    for k, v in node.items()
+                    if k not in keys
+                }
+            if isinstance(node, list):
+                return [_strip_keys(v, keys) for v in node]
+            if isinstance(node, tuple):
+                return tuple(_strip_keys(v, keys) for v in node)
+            return node
+
+        if 'train_cfg' in kwargs and kwargs['train_cfg'] is not None:
+            kwargs['train_cfg'] = _strip_keys(
+                kwargs['train_cfg'], {'ann_file', 'map_ann_file'})
+        if 'test_cfg' in kwargs and kwargs['test_cfg'] is not None:
+            kwargs['test_cfg'] = _strip_keys(
+                kwargs['test_cfg'], {'ann_file', 'map_ann_file'})
 
         self.bev_h = bev_h
         self.bev_w = bev_w

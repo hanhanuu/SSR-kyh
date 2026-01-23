@@ -17,6 +17,7 @@
 """
 import time
 import copy
+import os
 
 import torch
 from mmdet.models import DETECTORS
@@ -31,7 +32,7 @@ from projects.mmdet3d_plugin.SSR.planner.metric_stp3 import PlanningMetric
 from .tokenlearner import TokenFuser
 import torch.nn.functional as F
 import torch.nn as nn
-
+# models/model_ssr.py
 
 @DETECTORS.register_module()
 class SSR(MVXTwoStageDetector):
@@ -57,9 +58,13 @@ class SSR(MVXTwoStageDetector):
                  video_test_mode=False,
                  fut_ts=6,
                  fut_mode=6,
-                 loss_bev=None
-                 ):
-
+                 loss_bev=None,
+                 ann_file=None 
+    ):
+        self.ann_file = ann_file
+        if self.ann_file:
+            if not os.path.exists(self.ann_file):
+                raise ValueError(f"Annotation file {self.ann_file} does not exist.")
         super(SSR,
               self).__init__(pts_voxel_layer, pts_voxel_encoder,
                              pts_middle_encoder, pts_fusion_layer,
@@ -73,6 +78,8 @@ class SSR(MVXTwoStageDetector):
         self.fut_ts = fut_ts
         self.fut_mode = fut_mode
         self.valid_fut_ts = pts_bbox_head['valid_fut_ts']
+        self.ann_file = ann_file
+
 
         # temporal
         self.video_test_mode = video_test_mode

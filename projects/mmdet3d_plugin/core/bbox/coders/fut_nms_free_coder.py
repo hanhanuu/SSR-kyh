@@ -25,7 +25,8 @@ class CustomNMSFreeCoder(BaseBBoxCoder):
                  post_center_range=None,
                  max_num=100,
                  score_threshold=None,
-                 num_classes=10):
+                 num_classes=10,
+                 **kwargs):
         self.pc_range = pc_range
         self.voxel_size = voxel_size
         self.post_center_range = post_center_range
@@ -124,4 +125,3 @@ class CustomNMSFreeCoder(BaseBBoxCoder):
         for i in range(batch_size):
             predictions_list.append(self.decode_single(all_cls_scores[i], all_bbox_preds[i], all_traj_preds[i]))
         return predictions_list
-
