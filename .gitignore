@@ -1,0 +1,21 @@
+# Python caches
+__pycache__/
+*.py[cod]
+
+# VSCode
+.vscode/
+
+# Training outputs / logs / checkpoints
+work_dirs/
+ckpts/
+*.pth
+*.log
+*.log.json
+
+# Data symlinks / datasets
+data/nuscenes
+data/nuscenes.bak
+nuscenes
+
+# Misc
+*.tmp
