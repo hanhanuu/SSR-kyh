@@ -1,0 +1,134 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="980" viewBox="0 0 1800 980">
+  <defs>
+    <style>
+      .title { font: 700 38px 'DejaVu Sans', Arial, sans-serif; fill: #0f172a; }
+      .subtitle { font: 500 20px 'DejaVu Sans', Arial, sans-serif; fill: #334155; }
+      .boxTitle { font: 700 20px 'DejaVu Sans', Arial, sans-serif; fill: #0f172a; }
+      .boxText { font: 500 16px 'DejaVu Sans', Arial, sans-serif; fill: #1f2937; }
+      .noteText { font: 500 15px 'DejaVu Sans', Arial, sans-serif; fill: #0f172a; }
+      .smallText { font: 500 14px 'DejaVu Sans', Arial, sans-serif; fill: #334155; }
+      .baseline { fill: #e2e8f0; stroke: #64748b; stroke-width: 2.2; rx: 16; ry: 16; }
+      .added { fill: #dbeafe; stroke: #2563eb; stroke-width: 2.4; rx: 16; ry: 16; }
+      .risk { fill: #ffedd5; stroke: #ea580c; stroke-width: 2.4; rx: 16; ry: 16; }
+      .final { fill: #dcfce7; stroke: #16a34a; stroke-width: 2.4; rx: 16; ry: 16; }
+      .arrowBase { stroke: #334155; stroke-width: 2.8; fill: none; marker-end: url(#arrowHeadBase); }
+      .arrowAdd { stroke: #2563eb; stroke-width: 3.0; fill: none; marker-end: url(#arrowHeadAdd); }
+      .arrowRisk { stroke: #ea580c; stroke-width: 3.0; fill: none; marker-end: url(#arrowHeadRisk); }
+      .legendBaseline { fill: #e2e8f0; stroke: #64748b; stroke-width: 2; }
+      .legendAdded { fill: #dbeafe; stroke: #2563eb; stroke-width: 2; }
+      .legendRisk { fill: #ffedd5; stroke: #ea580c; stroke-width: 2; }
+      .legendFinal { fill: #dcfce7; stroke: #16a34a; stroke-width: 2; }
+    </style>
+
+    <marker id="arrowHeadBase" markerWidth="12" markerHeight="10" refX="10" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 z" fill="#334155"/>
+    </marker>
+    <marker id="arrowHeadAdd" markerWidth="12" markerHeight="10" refX="10" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/>
+    </marker>
+    <marker id="arrowHeadRisk" markerWidth="12" markerHeight="10" refX="10" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 z" fill="#ea580c"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1800" height="980" fill="#f8fafc"/>
+
+  <text x="900" y="62" text-anchor="middle" class="title">SSR End-to-End with Risk + Fusion + MLP (riskw0.6)</text>
+  <text x="900" y="94" text-anchor="middle" class="subtitle">Based on: SSR_e2e_risk_fuse_mlp_aspp_futureocc_riskw06_12ep.py + SSR_head.py</text>
+
+  <!-- Top pipeline (baseline trunk) -->
+  <rect x="70" y="180" width="210" height="105" class="baseline"/>
+  <text x="175" y="214" text-anchor="middle" class="boxTitle">Multi-view Images</text>
+  <text x="175" y="240" text-anchor="middle" class="boxText">6 cameras</text>
+  <text x="175" y="262" text-anchor="middle" class="smallText">Input</text>
+
+  <rect x="340" y="160" width="320" height="145" class="baseline"/>
+  <text x="500" y="196" text-anchor="middle" class="boxTitle">Image Backbone + Neck</text>
+  <text x="500" y="224" text-anchor="middle" class="boxText">ResNet50 + FPN</text>
+  <text x="500" y="248" text-anchor="middle" class="boxText">Camera feature extraction</text>
+  <text x="500" y="272" text-anchor="middle" class="smallText">Baseline SSR trunk</text>
+
+  <rect x="730" y="160" width="360" height="145" class="baseline"/>
+  <text x="910" y="196" text-anchor="middle" class="boxTitle">SSR Perception Transformer</text>
+  <text x="910" y="224" text-anchor="middle" class="boxText">BEV encoder + temporal modeling</text>
+  <text x="910" y="248" text-anchor="middle" class="boxText">BEV embed (100 x 100 x C)</text>
+  <text x="910" y="272" text-anchor="middle" class="smallText">Core SSR representation</text>
+
+  <rect x="1160" y="160" width="280" height="145" class="baseline"/>
+  <text x="1300" y="196" text-anchor="middle" class="boxTitle">Detection / Map Branch</text>
+  <text x="1300" y="224" text-anchor="middle" class="boxText">Object + map heads</text>
+  <text x="1300" y="248" text-anchor="middle" class="boxText">Standard SSR outputs</text>
+  <text x="1300" y="272" text-anchor="middle" class="smallText">Parallel baseline branch</text>
+
+  <path d="M280,232 L340,232" class="arrowBase"/>
+  <path d="M660,232 L730,232" class="arrowBase"/>
+  <path d="M1090,232 L1160,232" class="arrowBase"/>
+
+  <!-- Motion baseline branch -->
+  <rect x="730" y="380" width="360" height="135" class="baseline"/>
+  <text x="910" y="416" text-anchor="middle" class="boxTitle">Motion Query + Way Decoder</text>
+  <text x="910" y="442" text-anchor="middle" class="boxText">Initial ego trajectory modes</text>
+  <text x="910" y="468" text-anchor="middle" class="boxText">ego_fut_preds0</text>
+
+  <path d="M910,305 L910,380" class="arrowBase"/>
+
+  <!-- Risk branch -->
+  <rect x="1230" y="380" width="250" height="115" class="risk"/>
+  <text x="1355" y="416" text-anchor="middle" class="boxTitle">ASPP Risk Head</text>
+  <text x="1355" y="442" text-anchor="middle" class="boxText">risk_supervision=future_occ</text>
+  <text x="1355" y="466" text-anchor="middle" class="boxText">risk_out_act=sigmoid</text>
+
+  <rect x="1230" y="540" width="250" height="105" class="risk"/>
+  <text x="1355" y="576" text-anchor="middle" class="boxTitle">Risk Map</text>
+  <text x="1355" y="602" text-anchor="middle" class="boxText">loss weight = 0.6</text>
+
+  <path d="M1090,242 C1160,242 1185,380 1230,438" class="arrowRisk"/>
+  <path d="M1355,495 L1355,540" class="arrowRisk"/>
+
+  <!-- Fusion + refiner -->
+  <rect x="500" y="560" width="320" height="110" class="added"/>
+  <text x="660" y="596" text-anchor="middle" class="boxTitle">Risk Fusion</text>
+  <text x="660" y="622" text-anchor="middle" class="boxText">mode = dual_res</text>
+  <text x="660" y="646" text-anchor="middle" class="boxText">bev_feat + risk_map -&gt; fused BEV</text>
+
+  <rect x="900" y="560" width="360" height="130" class="added"/>
+  <text x="1080" y="596" text-anchor="middle" class="boxTitle">Traj MLP Refiner</text>
+  <text x="1080" y="622" text-anchor="middle" class="boxText">use_bev=True, use_risk=True</text>
+  <text x="1080" y="646" text-anchor="middle" class="boxText">refine_steps=3, alpha=0.1</text>
+  <text x="1080" y="670" text-anchor="middle" class="smallText">iterative trajectory refinement</text>
+
+  <path d="M910,515 C910,560 780,560 820,615" class="arrowAdd"/>
+  <path d="M910,305 C910,510 660,510 660,560" class="arrowAdd"/>
+  <path d="M1355,645 C1355,690 1230,690 1180,690" class="arrowRisk"/>
+  <path d="M820,615 L900,615" class="arrowAdd"/>
+  <path d="M1090,515 C1090,560 1030,560 1030,560" class="arrowAdd"/>
+
+  <!-- Final output -->
+  <rect x="1320" y="760" width="320" height="120" class="final"/>
+  <text x="1480" y="798" text-anchor="middle" class="boxTitle">Final Ego Trajectory</text>
+  <text x="1480" y="824" text-anchor="middle" class="boxText">ego_fut_preds (refined)</text>
+  <text x="1480" y="848" text-anchor="middle" class="boxText">used by planning metrics</text>
+
+  <path d="M1260,625 C1330,625 1360,760 1420,760" class="arrowAdd"/>
+
+  <!-- Loss note -->
+  <rect x="90" y="760" width="1140" height="120" fill="#eef2ff" stroke="#4f46e5" stroke-width="2" rx="16" ry="16"/>
+  <text x="120" y="798" class="noteText">Training supervision (key parts):</text>
+  <text x="120" y="828" class="smallText">1) Baseline SSR losses (detection/map/planning) kept intact.</text>
+  <text x="120" y="854" class="smallText">2) Added risk loss: future occupancy target + MSE, weighted by risk_loss_weight=0.6.</text>
+  <text x="650" y="854" class="smallText">3) Refiner uses fused BEV and risk map to optimize ego_fut_preds.</text>
+
+  <!-- Legend -->
+  <rect x="1510" y="120" width="250" height="210" fill="#ffffff" stroke="#94a3b8" stroke-width="1.8" rx="12" ry="12"/>
+  <text x="1635" y="150" text-anchor="middle" class="boxTitle">Legend</text>
+  <rect x="1532" y="167" width="26" height="18" class="legendBaseline"/>
+  <text x="1570" y="182" class="smallText">Baseline SSR module</text>
+  <rect x="1532" y="202" width="26" height="18" class="legendAdded"/>
+  <text x="1570" y="217" class="smallText">Added module (this work)</text>
+  <rect x="1532" y="237" width="26" height="18" class="legendRisk"/>
+  <text x="1570" y="252" class="smallText">Risk branch related</text>
+  <rect x="1532" y="272" width="26" height="18" class="legendFinal"/>
+  <text x="1570" y="287" class="smallText">Final planning output</text>
+  <line x1="1532" y1="307" x2="1558" y2="307" class="arrowAdd"/>
+  <text x="1570" y="312" class="smallText">Data/control flow</text>
+</svg>

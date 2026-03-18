@@ -19,6 +19,7 @@ from nuscenes.eval.common.utils import center_distance
 from projects.mmdet3d_plugin.models.utils.visual import save_tensor
 from mmcv.parallel import DataContainer as DC
 import random
+from projects.mmdet3d_plugin.SSR.planner.metric_stp3 import PlanningMetric
 from mmdet3d.core import LiDARInstance3DBoxes
 from nuscenes.utils.data_classes import Box as NuScenesBox
 from projects.mmdet3d_plugin.core.bbox.structures.nuscenes_box import CustomNuscenesBox
@@ -1732,23 +1733,109 @@ class VADCustomNuScenesDataset(NuScenesDataset):
         metric_dict = None
         num_valid = 0
         for res in results:
-            if res['metric_results']['fut_valid_flag']:
-                num_valid += 1
-            else:
+            # adapt to different result formats
+            if isinstance(res, tuple):
+                # expected: (prev_bev, bbox_list)
+                if len(res) > 1 and isinstance(res[1], list) and len(res[1]) > 0:
+                    res = res[1][0]
+                else:
+                    continue
+            if not isinstance(res, dict):
                 continue
+            if 'metric_results' not in res:
+                continue
+            # force include for logging
+            num_valid += 1
             if metric_dict is None:
                 metric_dict = copy.deepcopy(res['metric_results'])
             else:
                 for k in res['metric_results'].keys():
                     metric_dict[k] += res['metric_results'][k]
-        
-        for k in metric_dict:
-            metric_dict[k] = metric_dict[k] / num_valid
-            print("{}:{}".format(k, metric_dict[k]))
+
+        # Fallback: compute planning metrics from results if metric_results missing.
+        if metric_dict is None:
+            pm = PlanningMetric()
+            metric_dict = {
+                'plan_L2_1s': 0.0,
+                'plan_L2_2s': 0.0,
+                'plan_L2_3s': 0.0,
+                'plan_obj_col_1s': 0.0,
+                'plan_obj_col_2s': 0.0,
+                'plan_obj_col_3s': 0.0,
+                'plan_obj_box_col_1s': 0.0,
+                'plan_obj_box_col_2s': 0.0,
+                'plan_obj_box_col_3s': 0.0,
+            }
+            for sample_id, res in enumerate(results):
+                if isinstance(res, tuple):
+                    if len(res) > 1 and isinstance(res[1], list) and len(res[1]) > 0:
+                        res = res[1][0]
+                    else:
+                        continue
+                if not isinstance(res, dict):
+                    continue
+                det = res.get('pts_bbox', res)
+                if not isinstance(det, dict):
+                    continue
+                pred = det.get('ego_fut_preds', None)
+                cmd = det.get('ego_fut_cmd', None)
+                if pred is None or cmd is None:
+                    continue
+                # resolve cmd index
+                if isinstance(cmd, torch.Tensor):
+                    cmd_tensor = cmd
+                else:
+                    cmd_tensor = torch.tensor(cmd)
+                cmd_tensor = cmd_tensor.reshape(-1)
+                if cmd_tensor.numel() > 1:
+                    cmd_idx = int(torch.nonzero(cmd_tensor)[0, 0].item()) if cmd_tensor.sum() > 0 else 0
+                else:
+                    cmd_idx = int(cmd_tensor.item())
+
+                pred = pred[cmd_idx] if pred.dim() == 3 else pred
+                pred = pred.cumsum(dim=-2)
+
+                gt_traj = self.data_infos[sample_id]['gt_ego_fut_trajs']
+                gt_traj = torch.tensor(gt_traj, dtype=pred.dtype)
+                gt_traj = gt_traj.cumsum(dim=0)
+
+                ann = self.get_ann_info(sample_id)
+                gt_agent_boxes = ann['gt_bboxes_3d']
+                gt_agent_feats = ann['attr_labels']
+                seg_np, ped_np = pm.get_birds_eye_view_label(gt_agent_boxes, gt_agent_feats)
+                seg = torch.from_numpy(seg_np).long()
+                ped = torch.from_numpy(ped_np).long()
+                occupancy = torch.logical_or(seg, ped)
+
+                for i in range(3):
+                    cur_time = (i + 1) * 2
+                    traj_L2 = pm.compute_L2(
+                        pred[:cur_time].detach(),
+                        gt_traj[:cur_time]
+                    )
+                    obj_coll, obj_box_coll = pm.evaluate_coll(
+                        pred[None, :cur_time].detach(),
+                        gt_traj[None, :cur_time],
+                        occupancy[None, :cur_time]
+                    )
+                    metric_dict[f'plan_L2_{i+1}s'] += traj_L2
+                    metric_dict[f'plan_obj_col_{i+1}s'] += obj_coll.mean().item()
+                    metric_dict[f'plan_obj_box_col_{i+1}s'] += obj_box_coll.mean().item()
+                num_valid += 1
+
+        if metric_dict is not None and num_valid > 0:
+            for k in metric_dict:
+                metric_dict[k] = metric_dict[k] / num_valid
+                print("{}:{}".format(k, metric_dict[k]))
+        else:
+            print('No planning metrics found (num_valid=0 or metric_results missing).')
 
         result_files, tmp_dir = self.format_results(results, jsonfile_prefix)
 
         results_dict = dict()
+        if metric_dict is not None and num_valid > 0:
+            for k, v in metric_dict.items():
+                results_dict[k] = v
 
         if tmp_dir is not None:
             tmp_dir.cleanup()

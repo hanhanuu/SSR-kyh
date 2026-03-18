@@ -36,12 +36,12 @@ from mmdet.core import (multi_apply, multi_apply, reduce_mean)
 from mmcv.cnn.bricks.transformer import build_transformer_layer_sequence
 
 from projects.mmdet3d_plugin.core.bbox.util import normalize_bbox
-from projects.mmdet3d_plugin.SSR.utils.traj_lr_warmup import get_traj_warmup_loss_weight
 from projects.mmdet3d_plugin.SSR.utils.map_utils import (
     normalize_2d_pts, normalize_2d_bbox, denormalize_2d_pts, denormalize_2d_bbox
 )
 from .tokenlearner import *
 from mmdet.models.utils import LearnedPositionalEncoding
+from .risk_refiner import RiskHead, ASPPRiskHead, RiskFusion, TrajRefiner, TrajMLPRefiner
 
 class MLN(nn.Module):
     ''' 
@@ -160,6 +160,46 @@ class SSRHead(DETRHead):
                  loss_plan_reg=dict(type='L1Loss', loss_weight=0.25),
                  ego_lcf_feat_idx=None,
                  valid_fut_ts=6,
+                 use_risk_head=False,
+                 risk_head_type='conv',
+                 risk_out_act='softplus',
+                 risk_supervision='pseudo',
+                 risk_loss_weight=1.0,
+                 loss_risk=dict(type='MSELoss', loss_weight=1.0),
+                 risk_target_dilate=0,
+                 use_traj_refiner=False,
+                 refine_steps=0,
+                 refine_alpha=0.1,
+                 refiner_patch_size=5,
+                 refiner_use_bev=True,
+                 refiner_use_risk=True,
+                 refiner_num_layers=1,
+                 refiner_num_heads=4,
+                 refiner_ffn_dim=None,
+                 traj_refiner_type='mlp',
+                 refiner_mlp_hidden=None,
+                 traj0_aux_weight=0.0,
+                 traj_risk_weight=0.0,
+                 risk_loss_warmup_epochs=0.0,
+                 risk_loss_warmup_start=0.0,
+                 traj_risk_warmup_epochs=0.0,
+                 traj_risk_warmup_start=0.0,
+                 risk_fusion_mode='none',
+                 use_dynamic_metric_loss=False,
+                 metric_dyn_priors=(0.4, 0.3, 0.3),
+                 metric_dyn_gamma=1.5,
+                 metric_dyn_ema_momentum=0.98,
+                 metric_dyn_min_weight=0.15,
+                 metric_dyn_max_weight=0.70,
+                 metric_dyn_warmup_epochs=2.0,
+                 metric_dyn_warmup_start=0.0,
+                 metric_box_kernel_m=(1.8, 4.2),
+                 metric_col_scale=1.0,
+                 use_plan_box_col_loss=False,
+                 plan_box_col_loss_weight=0.5,
+                 plan_box_col_warmup_epochs=2.0,
+                 plan_box_col_warmup_start=0.0,
+                 plan_box_col_use_future_occ=True,
                  **kwargs):
         def _strip_keys(node, keys):
             if isinstance(node, dict):
@@ -194,6 +234,47 @@ class SSRHead(DETRHead):
         self.ego_lcf_feat_idx = ego_lcf_feat_idx
         self.valid_fut_ts = valid_fut_ts
         self.num_scenes = num_scenes
+        self.use_risk_head = use_risk_head
+        self.risk_head_type = risk_head_type
+        self.risk_out_act = risk_out_act
+        self.risk_supervision = risk_supervision
+        self.risk_loss_weight = risk_loss_weight
+        self.risk_target_dilate = risk_target_dilate
+        self.use_traj_refiner = use_traj_refiner
+        self.traj_refiner_type = traj_refiner_type
+        self.refine_steps = refine_steps
+        self.refine_alpha = refine_alpha
+        self.refiner_patch_size = refiner_patch_size
+        self.refiner_use_bev = refiner_use_bev
+        self.refiner_use_risk = refiner_use_risk
+        self.refiner_num_layers = refiner_num_layers
+        self.refiner_num_heads = refiner_num_heads
+        self.refiner_ffn_dim = refiner_ffn_dim
+        self.refiner_mlp_hidden = refiner_mlp_hidden
+        self.traj0_aux_weight = traj0_aux_weight
+        self.traj_risk_weight = traj_risk_weight
+        self.risk_loss_warmup_epochs = max(float(risk_loss_warmup_epochs), 0.0)
+        self.risk_loss_warmup_start = float(risk_loss_warmup_start)
+        self.traj_risk_warmup_epochs = max(float(traj_risk_warmup_epochs), 0.0)
+        self.traj_risk_warmup_start = float(traj_risk_warmup_start)
+        self.risk_fusion_mode = risk_fusion_mode
+        self.use_dynamic_metric_loss = bool(use_dynamic_metric_loss)
+        self.metric_dyn_priors = tuple(float(v) for v in metric_dyn_priors)
+        self.metric_dyn_gamma = float(metric_dyn_gamma)
+        self.metric_dyn_ema_momentum = min(max(float(metric_dyn_ema_momentum), 0.0), 0.9999)
+        self.metric_dyn_min_weight = max(float(metric_dyn_min_weight), 0.0)
+        self.metric_dyn_max_weight = min(max(float(metric_dyn_max_weight), 0.0), 1.0)
+        if self.metric_dyn_max_weight < self.metric_dyn_min_weight:
+            self.metric_dyn_max_weight = self.metric_dyn_min_weight
+        self.metric_dyn_warmup_epochs = max(float(metric_dyn_warmup_epochs), 0.0)
+        self.metric_dyn_warmup_start = float(metric_dyn_warmup_start)
+        self.metric_box_kernel_m = tuple(float(v) for v in metric_box_kernel_m)
+        self.metric_col_scale = max(float(metric_col_scale), 0.0)
+        self.use_plan_box_col_loss = bool(use_plan_box_col_loss)
+        self.plan_box_col_loss_weight = max(float(plan_box_col_loss_weight), 0.0)
+        self.plan_box_col_warmup_epochs = max(float(plan_box_col_warmup_epochs), 0.0)
+        self.plan_box_col_warmup_start = float(plan_box_col_warmup_start)
+        self.plan_box_col_use_future_occ = bool(plan_box_col_use_future_occ)
 
         if loss_traj_cls['use_sigmoid'] == True:
             self.traj_num_cls = 1
@@ -244,6 +325,65 @@ class SSRHead(DETRHead):
             self.map_code_weights, requires_grad=False), requires_grad=False)
 
         self.loss_plan_reg = build_loss(loss_plan_reg)
+        priors = torch.tensor(self.metric_dyn_priors, dtype=torch.float32)
+        if priors.numel() != 3:
+            raise ValueError('metric_dyn_priors must contain exactly 3 values for L2/ObjCol/BoxCol.')
+        priors = priors / priors.sum().clamp(min=1e-6)
+        self.register_buffer('metric_dyn_priors_tensor', priors, persistent=False)
+        self.register_buffer('metric_proxy_ema', torch.ones(3, dtype=torch.float32), persistent=False)
+        self.register_buffer('metric_proxy_ema_ready', torch.zeros(1, dtype=torch.float32), persistent=False)
+
+        self.loss_risk = None
+        if self.use_risk_head and loss_risk is not None:
+            self.loss_risk = build_loss(loss_risk)
+
+        self.risk_head = None
+        if self.use_risk_head:
+            if self.risk_head_type == 'conv':
+                self.risk_head = RiskHead(
+                    in_channels=self.embed_dims,
+                    hidden_channels=self.embed_dims // 2,
+                    out_act=self.risk_out_act,
+                )
+            elif self.risk_head_type == 'aspp':
+                self.risk_head = ASPPRiskHead(
+                    in_channels=self.embed_dims,
+                    hidden_channels=self.embed_dims,
+                    out_act=self.risk_out_act,
+                )
+            else:
+                raise ValueError(f'Unsupported risk_head_type: {self.risk_head_type}')
+        self.risk_fusion = None
+        if self.use_risk_head and self.risk_fusion_mode != 'none':
+            self.risk_fusion = RiskFusion(
+                channels=self.embed_dims, mode=self.risk_fusion_mode)
+
+        self.traj_refiner = None
+        if self.use_traj_refiner:
+            if self.traj_refiner_type == 'attn':
+                self.traj_refiner = TrajRefiner(
+                    embed_dims=self.embed_dims,
+                    num_layers=self.refiner_num_layers,
+                    num_heads=self.refiner_num_heads,
+                    ffn_dim=self.refiner_ffn_dim or self.embed_dims * 2,
+                    patch_size=self.refiner_patch_size,
+                    use_bev=self.refiner_use_bev,
+                    alpha=self.refine_alpha,
+                    max_fut_ts=self.fut_ts,
+                    pc_range=self.pc_range,
+                )
+            elif self.traj_refiner_type == 'mlp':
+                self.traj_refiner = TrajMLPRefiner(
+                    embed_dims=self.embed_dims,
+                    hidden_dim=self.refiner_mlp_hidden,
+                    use_bev=self.refiner_use_bev,
+                    use_risk=self.refiner_use_risk,
+                    alpha=self.refine_alpha,
+                    max_fut_ts=self.fut_ts,
+                    pc_range=self.pc_range,
+                )
+            else:
+                raise ValueError(f'Unsupported traj_refiner_type: {self.traj_refiner_type}')
 
     def _init_layers(self):
         """Initialize classification branch and regression branch of head."""
@@ -480,15 +620,285 @@ class SSRHead(DETRHead):
         act_query = self.action_mln(latent_query, wp_vector)
         # act_pos = self.pos_mln(latent_pos[:self.num_scenes, ...], wp_vector)
 
+        risk_map = None
+        bev_feat = bev_embed.permute(0, 2, 1).reshape(
+            bs, self.embed_dims, self.bev_h, self.bev_w)
+        if self.use_risk_head:
+            risk_map = self.risk_head(bev_feat)
+        bev_feat_for_refine = bev_feat
+        if self.risk_fusion is not None and risk_map is not None:
+            bev_feat_for_refine = self.risk_fusion(bev_feat, risk_map)
+
+        ego_fut_preds = outputs_ego_trajs
+        if self.use_traj_refiner and self.traj_refiner is not None and self.refine_steps > 0:
+            if self.traj_refiner_type == 'attn':
+                if risk_map is not None:
+                    ego_fut_preds = self.traj_refiner(
+                        outputs_ego_trajs,
+                        risk_map,
+                        bev_feat=bev_feat_for_refine,
+                        refine_steps=self.refine_steps,
+                    )
+            else:  # mlp refiner supports None risk_map / bev_feat depending on flags
+                ego_fut_preds = self.traj_refiner(
+                    outputs_ego_trajs,
+                    risk_map if self.refiner_use_risk else None,
+                    bev_feat=bev_feat_for_refine if self.refiner_use_bev else None,
+                    refine_steps=self.refine_steps,
+                )
+
         outs = {
             'bev_embed': bev_embed,
             'scene_query': latent_query,
             'act_query': act_query,
             # 'act_pos': act_pos,
-            'ego_fut_preds': outputs_ego_trajs,
+            'ego_fut_preds': ego_fut_preds,
         }
+        if self.use_risk_head:
+            outs['risk_map'] = risk_map
+        if self.use_traj_refiner:
+            outs['ego_fut_preds0'] = outputs_ego_trajs
 
         return outs
+
+    def _build_risk_target(self, gt_bboxes_list, device, dtype):
+        """Build a pseudo risk target from GT 3D boxes (BEV AABB)."""
+        B = len(gt_bboxes_list)
+        target = torch.zeros(
+            (B, 1, self.bev_h, self.bev_w), device=device, dtype=dtype)
+        x_min, y_min, _, x_max, y_max, _ = self.pc_range
+        for b, boxes in enumerate(gt_bboxes_list):
+            if boxes is None or len(boxes) == 0:
+                continue
+            if hasattr(boxes, 'tensor'):
+                t = boxes.tensor
+            else:
+                t = boxes
+            if t.numel() == 0:
+                continue
+            x = t[:, 0]
+            y = t[:, 1]
+            w = t[:, 3]
+            l = t[:, 4]
+            x1 = (x - w / 2).clamp(min=x_min, max=x_max)
+            x2 = (x + w / 2).clamp(min=x_min, max=x_max)
+            y1 = (y - l / 2).clamp(min=y_min, max=y_max)
+            y2 = (y + l / 2).clamp(min=y_min, max=y_max)
+
+            ix1 = ((x1 - x_min) / max(self.real_w, 1e-6) * (self.bev_w - 1)).floor().long()
+            ix2 = ((x2 - x_min) / max(self.real_w, 1e-6) * (self.bev_w - 1)).ceil().long()
+            iy1 = ((y1 - y_min) / max(self.real_h, 1e-6) * (self.bev_h - 1)).floor().long()
+            iy2 = ((y2 - y_min) / max(self.real_h, 1e-6) * (self.bev_h - 1)).ceil().long()
+
+            ix1 = ix1.clamp(0, self.bev_w - 1)
+            ix2 = ix2.clamp(0, self.bev_w - 1)
+            iy1 = iy1.clamp(0, self.bev_h - 1)
+            iy2 = iy2.clamp(0, self.bev_h - 1)
+
+            for i in range(ix1.size(0)):
+                target[b, 0, iy1[i]:iy2[i] + 1, ix1[i]:ix2[i] + 1] = 1.0
+        return target
+
+    def _build_risk_target_future_occ(self, gt_bboxes_list, gt_attr_labels, device, dtype):
+        """Build a risk target from GT future occupancy (AABB, aggregated over time).
+
+        This aligns better with STP3-style planning collision metrics which use
+        future agent boxes (from gt_attr_labels) rather than only the current box.
+        """
+        B = len(gt_bboxes_list)
+        target = torch.zeros(
+            (B, 1, self.bev_h, self.bev_w), device=device, dtype=dtype)
+
+        if gt_attr_labels is None:
+            return target
+
+        # Make gt_attr_labels indexable per batch.
+        if isinstance(gt_attr_labels, (list, tuple)):
+            attr_list = list(gt_attr_labels)
+        elif torch.is_tensor(gt_attr_labels) and gt_attr_labels.dim() >= 2:
+            # (B, N, C) -> list of (N, C)
+            attr_list = [gt_attr_labels[i] for i in range(min(B, gt_attr_labels.size(0)))]
+        else:
+            attr_list = [None] * B
+
+        x_min, y_min, _, x_max, y_max, _ = self.pc_range
+        T = int(min(self.valid_fut_ts, self.fut_ts, 6))
+        # NuScenes VAD attr layout uses: fut_traj(6*2) + fut_mask(6) + goal(1) + lcf_feat(9) + fut_yaw(6)
+        type_idx = 6 * 3 + 9  # 27 when T=6
+        veh_human_set = set([2, 3, 4, 5, 6, 7, 8] + list(range(14, 24)))
+
+        for b, boxes in enumerate(gt_bboxes_list):
+            if boxes is None or len(boxes) == 0:
+                continue
+            if hasattr(boxes, 'tensor'):
+                box_t = boxes.tensor
+            else:
+                box_t = boxes
+            if box_t.numel() == 0:
+                continue
+            if torch.is_tensor(box_t):
+                box_t = box_t.detach().to(device)
+
+            attr = attr_list[b] if b < len(attr_list) else None
+            if attr is None:
+                continue
+            if isinstance(attr, (list, tuple)) and len(attr) == 1:
+                attr = attr[0]
+            if torch.is_tensor(attr) and attr.dim() == 3 and attr.size(0) == 1:
+                attr = attr.squeeze(0)
+            if not torch.is_tensor(attr) or attr.numel() == 0:
+                continue
+            # gt_attr_labels is scattered to GPU while gt_bboxes_3d stays on CPU (cpu_only=True).
+            # Move boxes to GPU so risk supervision stays on GPU (avoid CPU-heavy work).
+            attr = attr.detach().to(device)
+
+            n = min(box_t.size(0), attr.size(0))
+            box_t = box_t[:n]
+            attr = attr[:n]
+
+            # Extract future deltas and masks (always 6 steps in data; we clamp by T).
+            fut_traj = attr[:, :6 * 2].reshape(n, 6, 2)[:, :T]
+            fut_mask = attr[:, 6 * 2:6 * 3].reshape(n, 6)[:, :T]
+            # Optional type filtering; if nothing passes, fall back to include all.
+            included = 0
+            if attr.size(1) > type_idx:
+                types = attr[:, type_idx].long()
+                type_ok = torch.tensor(
+                    [int(t.item()) in veh_human_set for t in types],
+                    device=attr.device,
+                    dtype=torch.bool,
+                )
+            else:
+                type_ok = torch.ones((n,), device=attr.device, dtype=torch.bool)
+
+            pos0 = box_t[:, 0:2]
+            fut_pos = fut_traj.cumsum(dim=1) + pos0[:, None, :]  # (n, T, 2)
+
+            # Rasterize AABB boxes on our BEV grid.
+            for i in range(n):
+                if not bool(type_ok[i].item()):
+                    continue
+                w = box_t[i, 3]
+                l = box_t[i, 4]
+                for t in range(T):
+                    if float(fut_mask[i, t].item()) < 0.5:
+                        continue
+                    included += 1
+                    x = fut_pos[i, t, 0]
+                    y = fut_pos[i, t, 1]
+                    x1 = (x - w / 2).clamp(min=x_min, max=x_max)
+                    x2 = (x + w / 2).clamp(min=x_min, max=x_max)
+                    y1 = (y - l / 2).clamp(min=y_min, max=y_max)
+                    y2 = (y + l / 2).clamp(min=y_min, max=y_max)
+
+                    ix1 = ((x1 - x_min) / max(self.real_w, 1e-6) * (self.bev_w - 1)).floor().long()
+                    ix2 = ((x2 - x_min) / max(self.real_w, 1e-6) * (self.bev_w - 1)).ceil().long()
+                    iy1 = ((y1 - y_min) / max(self.real_h, 1e-6) * (self.bev_h - 1)).floor().long()
+                    iy2 = ((y2 - y_min) / max(self.real_h, 1e-6) * (self.bev_h - 1)).ceil().long()
+
+                    ix1 = ix1.clamp(0, self.bev_w - 1)
+                    ix2 = ix2.clamp(0, self.bev_w - 1)
+                    iy1 = iy1.clamp(0, self.bev_h - 1)
+                    iy2 = iy2.clamp(0, self.bev_h - 1)
+
+                    target[b, 0, iy1:iy2 + 1, ix1:ix2 + 1] = 1.0
+
+            # If type filtering excluded everything, try again without filtering.
+            if included == 0 and attr.size(1) > type_idx:
+                for i in range(n):
+                    w = box_t[i, 3]
+                    l = box_t[i, 4]
+                    for t in range(T):
+                        if float(fut_mask[i, t].item()) < 0.5:
+                            continue
+                        x = fut_pos[i, t, 0]
+                        y = fut_pos[i, t, 1]
+                        x1 = (x - w / 2).clamp(min=x_min, max=x_max)
+                        x2 = (x + w / 2).clamp(min=x_min, max=x_max)
+                        y1 = (y - l / 2).clamp(min=y_min, max=y_max)
+                        y2 = (y + l / 2).clamp(min=y_min, max=y_max)
+                        ix1 = ((x1 - x_min) / max(self.real_w, 1e-6) * (self.bev_w - 1)).floor().long()
+                        ix2 = ((x2 - x_min) / max(self.real_w, 1e-6) * (self.bev_w - 1)).ceil().long()
+                        iy1 = ((y1 - y_min) / max(self.real_h, 1e-6) * (self.bev_h - 1)).floor().long()
+                        iy2 = ((y2 - y_min) / max(self.real_h, 1e-6) * (self.bev_h - 1)).ceil().long()
+                        ix1 = ix1.clamp(0, self.bev_w - 1)
+                        ix2 = ix2.clamp(0, self.bev_w - 1)
+                        iy1 = iy1.clamp(0, self.bev_h - 1)
+                        iy2 = iy2.clamp(0, self.bev_h - 1)
+                        target[b, 0, iy1:iy2 + 1, ix1:ix2 + 1] = 1.0
+
+        if self.risk_target_dilate and int(self.risk_target_dilate) > 0:
+            k = int(self.risk_target_dilate) * 2 + 1
+            target = F.max_pool2d(target, kernel_size=k, stride=1, padding=k // 2)
+        return target
+
+    def _sample_risk_at_traj(self, traj, risk_map):
+        """Sample risk map at trajectory points (bilinear)."""
+        risk_in = risk_map
+        if traj.dim() == 4:
+            B, M, T, _ = traj.shape
+            traj = traj.view(B * M, T, 2)
+            risk_in = risk_map.repeat_interleave(M, dim=0)
+        x_min, y_min, _, x_max, y_max, _ = self.pc_range
+        x = (traj[..., 0] - x_min) / max(x_max - x_min, 1e-6)
+        y = (traj[..., 1] - y_min) / max(y_max - y_min, 1e-6)
+        x = x * 2.0 - 1.0
+        y = y * 2.0 - 1.0
+        grid = torch.stack([x, y], dim=-1).unsqueeze(2)  # (BM, T, 1, 2)
+        risk = F.grid_sample(risk_in, grid, align_corners=True)
+        return risk.squeeze(1).squeeze(-1)
+
+    def _sample_risk_box_at_traj(self, traj, risk_map):
+        """Approximate box-collision risk by sampling max-pooled footprint risk."""
+        if self.bev_w <= 1 or self.bev_h <= 1:
+            return self._sample_risk_at_traj(traj, risk_map)
+        dx = self.real_w / max(float(self.bev_w - 1), 1.0)
+        dy = self.real_h / max(float(self.bev_h - 1), 1.0)
+        box_w, box_l = self.metric_box_kernel_m
+        kx = max(int(round(box_w / max(dx, 1e-6))), 1)
+        ky = max(int(round(box_l / max(dy, 1e-6))), 1)
+        if kx % 2 == 0:
+            kx += 1
+        if ky % 2 == 0:
+            ky += 1
+        risk_box = F.max_pool2d(risk_map, kernel_size=(ky, kx), stride=1, padding=(ky // 2, kx // 2))
+        return self._sample_risk_at_traj(traj, risk_box)
+
+    def _compute_dynamic_metric_weights(self, proxy_l2, proxy_obj_col, proxy_box_col):
+        """Compute dynamic weights for L2 / point-collision / box-collision proxies."""
+        eps = 1e-6
+        cur = torch.stack([proxy_l2, proxy_obj_col, proxy_box_col]).detach().float().clamp(min=eps)
+        if float(self.metric_proxy_ema_ready.item()) < 0.5:
+            self.metric_proxy_ema.copy_(cur)
+            self.metric_proxy_ema_ready.fill_(1.0)
+        else:
+            m = self.metric_dyn_ema_momentum
+            self.metric_proxy_ema.mul_(m).add_(cur * (1.0 - m))
+
+        ema = self.metric_proxy_ema.detach().clamp(min=eps)
+        ratios = (cur / ema).clamp(min=0.25, max=4.0)
+        priors = self.metric_dyn_priors_tensor.to(device=cur.device, dtype=cur.dtype)
+
+        raw = priors * torch.pow(ratios, self.metric_dyn_gamma)
+        weights = raw / raw.sum().clamp(min=eps)
+
+        weights = weights.clamp(min=self.metric_dyn_min_weight, max=self.metric_dyn_max_weight)
+        weights = weights / weights.sum().clamp(min=eps)
+
+        warm = float(self._get_epoch_warmup_scale(self.metric_dyn_warmup_epochs, self.metric_dyn_warmup_start))
+        warm = max(0.0, min(1.0, warm))
+        weights = (1.0 - warm) * priors + warm * weights
+        weights = weights / weights.sum().clamp(min=eps)
+        return weights.to(dtype=proxy_l2.dtype)
+
+    def _get_epoch_warmup_scale(self, warmup_epochs, start):
+        """Linear warmup factor based on runner epoch."""
+        if warmup_epochs <= 0:
+            return 1.0
+        cur_epoch = max(float(getattr(self, 'epoch', 0)), 0.0)
+        progress = min(cur_epoch / float(warmup_epochs), 1.0)
+        start = min(max(float(start), 0.0), 1.0)
+        return start + (1.0 - start) * progress
 
     @force_fp32(apply_to=('preds_dicts'))
     def loss(self,
@@ -533,6 +943,12 @@ class SSRHead(DETRHead):
         """
 
         ego_fut_preds = preds_dicts['ego_fut_preds']
+        ego_fut_preds0 = preds_dicts.get('ego_fut_preds0', None)
+        risk_map = preds_dicts.get('risk_map', None)
+        risk_warmup_scale = self._get_epoch_warmup_scale(
+            self.risk_loss_warmup_epochs, self.risk_loss_warmup_start)
+        traj_risk_warmup_scale = self._get_epoch_warmup_scale(
+            self.traj_risk_warmup_epochs, self.traj_risk_warmup_start)
 
         loss_dict = dict()
 
@@ -550,6 +966,82 @@ class SSRHead(DETRHead):
             ego_fut_gt,
             loss_plan_l1_weight
         )
-        loss_dict['loss_plan_reg'] = loss_plan_l1
+        mode_time_weight = ego_fut_cmd[..., None] * ego_fut_masks[:, None, :]
+        if ego_fut_preds.dim() == 4:
+            B, M, T, _ = ego_fut_preds.shape
+            mode_time_weight_flat = mode_time_weight.reshape(B * M, T)
+        else:
+            mode_time_weight_flat = ego_fut_masks
+
+        if self.use_plan_box_col_loss and not self.use_dynamic_metric_loss:
+            if self.plan_box_col_use_future_occ:
+                box_col_target = self._build_risk_target_future_occ(
+                    gt_bboxes_list,
+                    gt_attr_labels,
+                    device=ego_fut_preds.device,
+                    dtype=ego_fut_preds.dtype,
+                )
+            else:
+                box_col_target = self._build_risk_target(
+                    gt_bboxes_list,
+                    device=ego_fut_preds.device,
+                    dtype=ego_fut_preds.dtype,
+                )
+            proxy_box_col = self._sample_risk_box_at_traj(ego_fut_preds, box_col_target)
+            norm = mode_time_weight_flat.sum().clamp(min=1.0)
+            loss_plan_box_col = (proxy_box_col * mode_time_weight_flat).sum() / norm
+            box_col_warmup = self._get_epoch_warmup_scale(
+                self.plan_box_col_warmup_epochs, self.plan_box_col_warmup_start)
+            loss_dict['loss_plan_col_box'] = (
+                loss_plan_box_col * self.plan_box_col_loss_weight * box_col_warmup)
+
+        dynamic_metric_applied = False
+        if self.use_dynamic_metric_loss and risk_map is not None:
+            risk_point = self._sample_risk_at_traj(ego_fut_preds, risk_map)
+            risk_box = self._sample_risk_box_at_traj(ego_fut_preds, risk_map)
+            norm = mode_time_weight_flat.sum().clamp(min=1.0)
+            proxy_obj_col = (risk_point * mode_time_weight_flat).sum() / norm
+            proxy_box_col = (risk_box * mode_time_weight_flat).sum() / norm
+
+            dyn_w = self._compute_dynamic_metric_weights(
+                loss_plan_l1, proxy_obj_col, proxy_box_col)
+            loss_dict['loss_plan_reg'] = loss_plan_l1 * dyn_w[0]
+            loss_dict['loss_plan_col_obj'] = proxy_obj_col * dyn_w[1] * self.metric_col_scale
+            loss_dict['loss_plan_col_box'] = proxy_box_col * dyn_w[2] * self.metric_col_scale
+            loss_dict['stat_dyn_w_l2'] = dyn_w[0].detach()
+            loss_dict['stat_dyn_w_obj'] = dyn_w[1].detach()
+            loss_dict['stat_dyn_w_box'] = dyn_w[2].detach()
+            loss_dict['stat_proxy_obj_col'] = proxy_obj_col.detach()
+            loss_dict['stat_proxy_box_col'] = proxy_box_col.detach()
+            dynamic_metric_applied = True
+
+        if not dynamic_metric_applied:
+            loss_dict['loss_plan_reg'] = loss_plan_l1
+
+        if self.traj0_aux_weight > 0.0 and ego_fut_preds0 is not None:
+            loss_plan_aux = self.loss_plan_reg(
+                ego_fut_preds0,
+                ego_fut_gt,
+                loss_plan_l1_weight
+            )
+            loss_dict['loss_plan_reg_aux'] = loss_plan_aux * self.traj0_aux_weight
+
+        if self.use_risk_head and risk_map is not None and self.loss_risk is not None:
+            if self.risk_supervision == 'pseudo':
+                risk_target = self._build_risk_target(
+                    gt_bboxes_list, device=risk_map.device, dtype=risk_map.dtype)
+            elif self.risk_supervision == 'future_occ':
+                risk_target = self._build_risk_target_future_occ(
+                    gt_bboxes_list, gt_attr_labels, device=risk_map.device, dtype=risk_map.dtype)
+            else:
+                raise ValueError(f'Unsupported risk_supervision: {self.risk_supervision}')
+            loss_risk = self.loss_risk(risk_map, risk_target)
+            loss_dict['loss_risk'] = loss_risk * self.risk_loss_weight * risk_warmup_scale
+
+        if self.traj_risk_weight > 0.0 and risk_map is not None:
+            risk_vals = self._sample_risk_at_traj(ego_fut_preds, risk_map)
+            loss_traj_risk = risk_vals.mean()
+            loss_dict['loss_traj_risk'] = (
+                loss_traj_risk * self.traj_risk_weight * traj_risk_warmup_scale)
 
         return loss_dict

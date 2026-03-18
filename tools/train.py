@@ -241,6 +241,14 @@ def parse_args():
 def main():
     args = parse_args()
 
+    # Prevent accidental CPU training (user requirement). Set SSR_ALLOW_CPU=1 to override.
+    if os.environ.get('SSR_ALLOW_CPU', '0') != '1' and not torch.cuda.is_available():
+        raise RuntimeError(
+            'CUDA is not available (torch.cuda.is_available()=False). '
+            'Abort to avoid running on CPU. '
+            'If you really want CPU, set SSR_ALLOW_CPU=1.'
+        )
+
     cfg = Config.fromfile(args.config)
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)

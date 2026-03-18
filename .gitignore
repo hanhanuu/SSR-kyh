@@ -19,3 +19,4 @@ nuscenes
 
 # Misc
 *.tmp
+data/can_bus.zip

@@ -120,6 +120,14 @@ def parse_args():
 def main():
     args = parse_args()
 
+    # Prevent accidental CPU testing (user requirement). Set SSR_ALLOW_CPU=1 to override.
+    if os.environ.get('SSR_ALLOW_CPU', '0') != '1' and not torch.cuda.is_available():
+        raise RuntimeError(
+            'CUDA is not available (torch.cuda.is_available()=False). '
+            'Abort to avoid running on CPU. '
+            'If you really want CPU, set SSR_ALLOW_CPU=1.'
+        )
+
     assert args.out or args.eval or args.format_only or args.show \
         or args.show_dir, \
         ('Please specify at least one operation (save/eval/format/show the '

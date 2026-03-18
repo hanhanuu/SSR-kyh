@@ -5,9 +5,6 @@ _base_ = [
 #
 plugin = True
 plugin_dir = 'projects/mmdet3d_plugin/'
-custom_imports = dict(
-    imports=['projects.mmdet3d_plugin'],
-    allow_failed_imports=False)
 
 # If point cloud range is changed, the models should also change their point
 # cloud range accordingly
@@ -232,6 +229,9 @@ model = dict(
                 # ffn_dropout=0.1,
                 operation_order=('self_attn', 'norm', 'ffn', 'norm'))),
     loss_bev=dict(type='MSELoss', loss_weight=1.0),
+    #action
+    loss_acion_gt=dict(type='SmoothL1Loss', reduction='sum', loss_weight=1.0),
+    loss_action_future=dict(type='SmoothL1Loss', reduction='sum',loss_weight=1.0),
     # model training and testing settings
     train_cfg=dict(pts=dict(
         grid_size=[512, 512, 1],

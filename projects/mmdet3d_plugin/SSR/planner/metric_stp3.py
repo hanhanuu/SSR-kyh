@@ -10,6 +10,7 @@ from projects.mmdet3d_plugin.core.evaluation.metric_motion import get_ade, get_f
 from skimage.draw import polygon
 from nuscenes.utils.data_classes import Box
 from scipy.spatial.transform import Rotation as R
+from scipy.ndimage import distance_transform_edt
 
 ego_width, ego_length = 1.85, 4.084
 
@@ -399,6 +400,33 @@ class PlanningMetric():
             obj_box_coll_sum[ti[m2]] += (box_coll[ti[m2]]).long()
 
         return obj_coll_sum, obj_box_coll_sum
+
+    def compute_min_dist(self, trajs, occupancy):
+        """Minimum distance (meters) from ego center to nearest obstacle over the horizon.
+
+        trajs: torch.Tensor (n_future, 2) in lidar frame (x forward, y right)
+        occupancy: torch.Tensor (n_future, H, W) bool/int with 1 as obstacle
+        """
+        if occupancy.sum() == 0:
+            return 50.0
+        trajs_np = trajs.cpu().numpy()
+        occ_np = occupancy.cpu().numpy().astype(bool)
+        min_d = np.inf
+        # map from lidar coords to grid indices (same as evaluate_coll)
+        for t in range(occ_np.shape[0]):
+            yy = trajs_np[t, 1]
+            xx = trajs_np[t, 0]
+            xi = int(np.round((-self.bx[0].item()/2 - yy) / self.dx[0].item()))
+            yi = int(np.round((-self.bx[1].item()/2 + xx) / self.dx[1].item()))
+            if xi < 0 or yi < 0 or xi >= occ_np.shape[1] or yi >= occ_np.shape[2]:
+                continue
+            dist_map = distance_transform_edt(~occ_np[t])
+            d_pix = dist_map[xi, yi]
+            d_meter = d_pix * float(self.dx[0].item())
+            min_d = min(min_d, d_meter)
+        if min_d == np.inf:
+            return 0.0
+        return float(min_d)
 
     def compute_L2(self, trajs, gt_trajs):
         '''

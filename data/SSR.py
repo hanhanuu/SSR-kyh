@@ -17,7 +17,6 @@
 """
 import time
 import copy
-import os
 
 import torch
 from mmdet.models import DETECTORS
@@ -32,7 +31,7 @@ from projects.mmdet3d_plugin.SSR.planner.metric_stp3 import PlanningMetric
 from .tokenlearner import TokenFuser
 import torch.nn.functional as F
 import torch.nn as nn
-# models/model_ssr.py
+
 
 @DETECTORS.register_module()
 class SSR(MVXTwoStageDetector):
@@ -59,19 +58,10 @@ class SSR(MVXTwoStageDetector):
                  fut_ts=6,
                  fut_mode=6,
                  loss_bev=None,
-                 ann_file=None,
-                 # World-model BEV loss switch (default keeps original behavior)
-                 wm_loss_mode='mse',
-                 wm_voxel_size=0.15,
-                 wm_fog_alpha_range=(0.0, 0.06),
-                 wm_logvar_clamp=(-10.0, 5.0),
-                 wm_use_fog_prior=True,
-                 wm_latent_noise_weights=(1.0, 0.2, 0.01),
-    ):
-        self.ann_file = ann_file
-        if self.ann_file:
-            if not os.path.exists(self.ann_file):
-                raise ValueError(f"Annotation file {self.ann_file} does not exist.")
+                 loss_acion_gt=None,
+                 loss_action_future=None,
+                 ):
+
         super(SSR,
               self).__init__(pts_voxel_layer, pts_voxel_encoder,
                              pts_middle_encoder, pts_fusion_layer,
@@ -85,10 +75,6 @@ class SSR(MVXTwoStageDetector):
         self.fut_ts = fut_ts
         self.fut_mode = fut_mode
         self.valid_fut_ts = pts_bbox_head['valid_fut_ts']
-        self.bev_h = int(pts_bbox_head.get('bev_h', 0)) if isinstance(pts_bbox_head, dict) else 0
-        self.bev_w = int(pts_bbox_head.get('bev_w', 0)) if isinstance(pts_bbox_head, dict) else 0
-        self.ann_file = ann_file
-
 
         # temporal
         self.video_test_mode = video_test_mode
@@ -103,14 +89,6 @@ class SSR(MVXTwoStageDetector):
         self.embed_dims = 256
         self.latent_world_model = latent_world_model
         self.tokenfuser = TokenFuser(16, 256)
-        self.wm_loss_mode = wm_loss_mode
-        self.wm_voxel_size = float(wm_voxel_size)
-        self.wm_fog_alpha_range = tuple(float(x) for x in wm_fog_alpha_range)
-        self.wm_logvar_clamp = tuple(float(x) for x in wm_logvar_clamp)
-        self.wm_use_fog_prior = bool(wm_use_fog_prior)
-        self.wm_latent_noise_weights = tuple(float(x) for x in wm_latent_noise_weights)
-        if len(self.wm_latent_noise_weights) != 3:
-            raise ValueError('wm_latent_noise_weights must contain 3 values: [struct, noise, kl].')
 
         if self.latent_world_model is not None:
             self.latent_world_model = build_transformer_layer_sequence(self.latent_world_model)
@@ -118,121 +96,8 @@ class SSR(MVXTwoStageDetector):
                 if p.dim() > 1:
                     torch.nn.init.xavier_uniform_(p)
             self.loss_bev = build_loss(loss_bev)
-
-            if self.wm_loss_mode == 'gaussian_nll_fog_prior':
-                self.wm_logvar_head = nn.Conv2d(self.embed_dims, 1, kernel_size=1)
-                nn.init.constant_(self.wm_logvar_head.bias, 0.0)
-            elif self.wm_loss_mode == 'latent_noise_fog':
-                self.wm_struct_head = nn.Linear(self.embed_dims, self.embed_dims)
-                self.wm_noise_head = nn.Linear(self.embed_dims, self.embed_dims)
-                nn.init.xavier_uniform_(self.wm_struct_head.weight)
-                nn.init.constant_(self.wm_struct_head.bias, 0.0)
-                nn.init.xavier_uniform_(self.wm_noise_head.weight)
-                nn.init.constant_(self.wm_noise_head.bias, 0.0)
-
-    @staticmethod
-    def _wm_meshgrid(y, x):
-        """Compat meshgrid for torch versions without indexing arg."""
-        try:
-            return torch.meshgrid(y, x, indexing='ij')
-        except TypeError:
-            return torch.meshgrid(y, x)
-
-    def _wm_fog_prior_logvar(self, feat):
-        """Distance-based fog prior on log-variance (higher uncertainty further away)."""
-        if not self.wm_use_fog_prior:
-            return None
-        B, _, H, W = feat.shape
-        device = feat.device
-        dtype = feat.dtype
-        ys, xs = self._wm_meshgrid(
-            torch.arange(H, device=device, dtype=dtype),
-            torch.arange(W, device=device, dtype=dtype),
-        )
-        dist = torch.sqrt((xs - (W - 1) / 2) ** 2 + (ys - (H - 1) / 2) ** 2) * self.wm_voxel_size
-        dist = dist.unsqueeze(0).unsqueeze(0)  # [1,1,H,W]
-        alpha_min, alpha_max = self.wm_fog_alpha_range
-        if alpha_max <= alpha_min:
-            alpha = torch.full((B, 1, 1, 1), alpha_min, device=device, dtype=dtype)
-        else:
-            alpha = torch.rand((B, 1, 1, 1), device=device, dtype=dtype) * (alpha_max - alpha_min) + alpha_min
-        return alpha * dist
-
-    def _wm_gaussian_nll(self, mean, logvar, target):
-        logvar_min, logvar_max = self.wm_logvar_clamp
-        logvar = logvar.clamp(min=logvar_min, max=logvar_max)
-        var = torch.exp(logvar)
-        loss = (target - mean) ** 2 / (var + 1e-6) + logvar
-        return loss.mean()
-
-    def _wm_as_bev_2d(self, feat):
-        """Convert BEV feature to [B, C, H, W] for spatial losses."""
-        if feat.dim() == 4:
-            return feat
-        if feat.dim() != 3:
-            raise ValueError(f'Unsupported BEV feature dims: {feat.shape}')
-        B, HW, C = feat.shape
-        H, W = self.bev_h, self.bev_w
-        if H <= 0 or W <= 0:
-            side = int(HW ** 0.5)
-            H = side
-            W = HW // max(side, 1)
-        if H * W != HW:
-            raise ValueError(f'Cannot reshape BEV [B,HW,C]={feat.shape} into [B,C,H,W] with H={H}, W={W}.')
-        return feat.permute(0, 2, 1).contiguous().view(B, C, H, W)
-
-    def _wm_compute_noise_mask(self, prev_bev, next_bev):
-        """Build fog-aware noisy-region mask on BEV."""
-        prev_bev = self._wm_as_bev_2d(prev_bev)
-        next_bev = self._wm_as_bev_2d(next_bev)
-        device = prev_bev.device
-        dtype = prev_bev.dtype
-        B, _, H, W = prev_bev.shape
-        diff = torch.abs(next_bev - prev_bev).mean(dim=1, keepdim=True)
-        diff = diff / (diff.max().detach() + 1e-6)
-
-        alpha_min, alpha_max = self.wm_fog_alpha_range
-        if alpha_max <= alpha_min:
-            alpha = torch.full((B, 1, 1, 1), alpha_min, device=device, dtype=dtype)
-        else:
-            alpha = torch.rand((B, 1, 1, 1), device=device, dtype=dtype) * (alpha_max - alpha_min) + alpha_min
-
-        ys, xs = self._wm_meshgrid(
-            torch.arange(H, device=device, dtype=dtype),
-            torch.arange(W, device=device, dtype=dtype),
-        )
-        dist = torch.sqrt((xs - (W - 1) / 2) ** 2 + (ys - (H - 1) / 2) ** 2) * self.wm_voxel_size
-        dist = dist.unsqueeze(0).unsqueeze(0)
-        fog_threshold = torch.exp(-alpha * dist)
-        return (diff > fog_threshold).to(dtype=dtype)
-
-    def _wm_fog_weight_map(self, bev_feat):
-        """Distance-aware fog weight (larger in far range)."""
-        bev_feat = self._wm_as_bev_2d(bev_feat)
-        B, _, H, W = bev_feat.shape
-        device = bev_feat.device
-        dtype = bev_feat.dtype
-        y = torch.linspace(-H / 2, H / 2, H, device=device, dtype=dtype)
-        x = torch.linspace(-W / 2, W / 2, W, device=device, dtype=dtype)
-        yy, xx = self._wm_meshgrid(y, x)
-        dist = torch.sqrt(xx ** 2 + yy ** 2).unsqueeze(0).unsqueeze(0)
-
-        alpha_min, alpha_max = self.wm_fog_alpha_range
-        if alpha_max <= alpha_min:
-            alpha = torch.full((B, 1, 1, 1), alpha_min, device=device, dtype=dtype)
-        else:
-            alpha = torch.rand((B, 1, 1, 1), device=device, dtype=dtype) * (alpha_max - alpha_min) + alpha_min
-        return 1 - torch.exp(-alpha * dist)
-
-    @staticmethod
-    def _wm_masked_l1(pred, target, mask, eps=1e-6):
-        """L1 loss averaged on masked elements only."""
-        if mask is None:
-            return F.l1_loss(pred, target)
-        mask_expand = mask.expand_as(pred)
-        diff = torch.abs(pred - target) * mask_expand
-        denom = mask_expand.sum().clamp_min(eps)
-        return diff.sum() / denom
+            self.loss_acion_gt = build_loss(loss_acion_gt)
+            self.loss_action_future = build_loss(loss_action_future)
 
     def extract_img_feat(self, img, img_metas, len_queue=None):
         """Extract features of images."""
@@ -319,58 +184,43 @@ class SSR(MVXTwoStageDetector):
         losses = self.pts_bbox_head.loss(*loss_inputs, img_metas=img_metas)
 
         if self.latent_world_model is not None:
-            act_query = outs['act_query']
+            act_query = outs['act_query']  #mln后的结果
             # act_pos = outs['act_pos']
-            bev_embed = outs['bev_embed']
+            bev_embed = outs['bev_embed']  #current bev feature
 
-            pred_latent = self.latent_world_model(
+            pred_latent = self.latent_world_model(  ##mln后的结果自注意力
                     query=act_query,
                     key=act_query,
                     value=act_query)
             
             pred_bev = self.tokenfuser(pred_latent.permute(1, 0, 2), bev_embed)
-            if self.wm_loss_mode == 'gaussian_nll_fog_prior':
-                pred_bev_2d = self._wm_as_bev_2d(pred_bev)
-                target_bev_2d = self._wm_as_bev_2d(next_bev.detach())
-                logvar = self.wm_logvar_head(pred_bev_2d)
-                prior = self._wm_fog_prior_logvar(pred_bev_2d)
-                if prior is not None:
-                    logvar = logvar + prior
-                loss_bev = self._wm_gaussian_nll(pred_bev_2d, logvar, target_bev_2d)
-                # keep the same scaling convention as build_loss(loss_bev)
-                if hasattr(self.loss_bev, 'loss_weight'):
-                    loss_bev = loss_bev * float(getattr(self.loss_bev, 'loss_weight', 1.0))
-            elif self.wm_loss_mode == 'latent_noise_fog':
-                struct_latent = self.wm_struct_head(pred_latent)
-                noise_latent = self.wm_noise_head(pred_latent)
-                fog_weight = self._wm_fog_weight_map(bev_embed)
-                # Use per-sample fog gate instead of a global scalar to stabilize multi-GPU training.
-                fog_gate = fog_weight.mean(dim=(2, 3), keepdim=False).view(1, -1, 1)
-                combined_latent = struct_latent + noise_latent * fog_gate
 
-                pred_bev = self.tokenfuser(combined_latent.permute(1, 0, 2), bev_embed)
-                pred_bev_2d = self._wm_as_bev_2d(pred_bev)
-                target_bev_2d = self._wm_as_bev_2d(next_bev.detach())
-                noise_mask = self._wm_compute_noise_mask(bev_embed.detach(), next_bev.detach())
-                real_mask = 1.0 - noise_mask
-
-                loss_struct = self._wm_masked_l1(pred_bev_2d, target_bev_2d, real_mask)
-                pred_noise = pred_bev_2d * noise_mask
-                gt_noise = target_bev_2d * noise_mask
-                loss_noise_global = F.l1_loss(
-                    pred_noise.mean(dim=(2, 3)),
-                    gt_noise.mean(dim=(2, 3)),
-                )
-                loss_noise_local = self._wm_masked_l1(pred_bev_2d, target_bev_2d, noise_mask)
-                loss_noise = 0.5 * loss_noise_global + 0.5 * loss_noise_local
-                loss_kl = torch.mean(noise_latent ** 2)
-                ws, wn, wk = self.wm_latent_noise_weights
-                loss_bev = ws * loss_struct + wn * loss_noise + wk * loss_kl
-                if hasattr(self.loss_bev, 'loss_weight'):
-                    loss_bev = loss_bev * float(getattr(self.loss_bev, 'loss_weight', 1.0))
-            else:
-                loss_bev = self.loss_bev(pred_bev, next_bev.detach())
+            loss_bev = self.loss_bev(pred_bev, next_bev.detach())  #next_bev单纯用于训练
             losses.update(loss_bev=loss_bev)
+
+            # action
+            current_action = outs['current_action']
+            loss_action_gt = self.loss_action_gt(current_action, ego_lcf_feat)
+            losses.update(loss_action_gt=loss_action_gt)
+
+            with torch.no_grad():
+                outs_next = self.pts_bbox_head(
+                    next_pts_feats,
+                    next_img_metas,
+                    prev_bev=None,
+                    ego_his_trajs=None,
+                    ego_lcf_feat=None,
+                    cmd=ego_fut_cmd
+                )
+            future_action_pred = outs['future_action']
+            future_action_obs = outs_next['current_action']
+            loss_action_future = self.loss_action_future(
+                future_action_pred,
+                future_action_obs.detach()
+            )
+
+            losses.update(loss_action_future=loss_action_future)
+
 
         return losses
 
