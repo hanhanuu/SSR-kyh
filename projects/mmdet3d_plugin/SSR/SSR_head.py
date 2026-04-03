@@ -200,6 +200,10 @@ class SSRHead(DETRHead):
                  plan_box_col_warmup_epochs=2.0,
                  plan_box_col_warmup_start=0.0,
                  plan_box_col_use_future_occ=True,
+                 use_plan_pcgrad=False,
+                 pcgrad_eps=1e-8,
+                 pcgrad_min_scale=0.25,
+                 pcgrad_max_scale=2.0,
                  **kwargs):
         def _strip_keys(node, keys):
             if isinstance(node, dict):
@@ -275,6 +279,10 @@ class SSRHead(DETRHead):
         self.plan_box_col_warmup_epochs = max(float(plan_box_col_warmup_epochs), 0.0)
         self.plan_box_col_warmup_start = float(plan_box_col_warmup_start)
         self.plan_box_col_use_future_occ = bool(plan_box_col_use_future_occ)
+        self.use_plan_pcgrad = bool(use_plan_pcgrad)
+        self.pcgrad_eps = max(float(pcgrad_eps), 1e-12)
+        self.pcgrad_min_scale = max(float(pcgrad_min_scale), 0.0)
+        self.pcgrad_max_scale = max(float(pcgrad_max_scale), self.pcgrad_min_scale)
 
         if loss_traj_cls['use_sigmoid'] == True:
             self.traj_num_cls = 1
@@ -900,6 +908,36 @@ class SSRHead(DETRHead):
         start = min(max(float(start), 0.0), 1.0)
         return start + (1.0 - start) * progress
 
+    def _compute_plan_pcgrad_scales(self, loss_main, loss_aux, traj_tensor):
+        """PCGrad-style conflict handling for planning L2 vs box-collision losses."""
+        one = loss_main.detach().new_tensor(1.0)
+        zero = loss_main.detach().new_tensor(0.0)
+        if (not self.use_plan_pcgrad) or traj_tensor is None or (not traj_tensor.requires_grad):
+            return one, one, zero
+
+        g_main = torch.autograd.grad(
+            loss_main, traj_tensor, retain_graph=True, allow_unused=True)[0]
+        g_aux = torch.autograd.grad(
+            loss_aux, traj_tensor, retain_graph=True, allow_unused=True)[0]
+        if g_main is None or g_aux is None:
+            return one, one, zero
+
+        g_main = g_main.reshape(-1)
+        g_aux = g_aux.reshape(-1)
+        dot = (g_main * g_aux).sum()
+        norm_main = (g_main * g_main).sum().clamp(min=self.pcgrad_eps)
+        norm_aux = (g_aux * g_aux).sum().clamp(min=self.pcgrad_eps)
+        cos = (dot / (torch.sqrt(norm_main * norm_aux).clamp(min=self.pcgrad_eps))).detach()
+
+        if float(dot.detach().item()) >= 0.0:
+            return one, one, cos
+
+        main_scale = (1.0 - dot / norm_main).detach().clamp(
+            min=self.pcgrad_min_scale, max=self.pcgrad_max_scale)
+        aux_scale = (1.0 - dot / norm_aux).detach().clamp(
+            min=self.pcgrad_min_scale, max=self.pcgrad_max_scale)
+        return main_scale, aux_scale, cos
+
     @force_fp32(apply_to=('preds_dicts'))
     def loss(self,
              gt_bboxes_list,
@@ -992,8 +1030,17 @@ class SSRHead(DETRHead):
             loss_plan_box_col = (proxy_box_col * mode_time_weight_flat).sum() / norm
             box_col_warmup = self._get_epoch_warmup_scale(
                 self.plan_box_col_warmup_epochs, self.plan_box_col_warmup_start)
-            loss_dict['loss_plan_col_box'] = (
+            loss_plan_box_col = (
                 loss_plan_box_col * self.plan_box_col_loss_weight * box_col_warmup)
+            if self.use_plan_pcgrad:
+                main_scale, box_scale, pcgrad_cos = self._compute_plan_pcgrad_scales(
+                    loss_plan_l1, loss_plan_box_col, ego_fut_preds)
+                loss_plan_l1 = loss_plan_l1 * main_scale
+                loss_plan_box_col = loss_plan_box_col * box_scale
+                loss_dict['stat_pcgrad_cos'] = pcgrad_cos
+                loss_dict['stat_pcgrad_l2_scale'] = main_scale
+                loss_dict['stat_pcgrad_box_scale'] = box_scale
+            loss_dict['loss_plan_col_box'] = loss_plan_box_col
 
         dynamic_metric_applied = False
         if self.use_dynamic_metric_loss and risk_map is not None:

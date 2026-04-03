@@ -67,6 +67,12 @@ class SSR(MVXTwoStageDetector):
                  wm_logvar_clamp=(-10.0, 5.0),
                  wm_use_fog_prior=True,
                  wm_latent_noise_weights=(1.0, 0.2, 0.01),
+                 infer_safe_reorder=False,
+                 infer_safe_reorder_use_box=True,
+                 infer_safe_reorder_risk_weight=1.0,
+                 infer_safe_reorder_cmd_penalty=0.08,
+                 infer_safe_reorder_dev_weight=0.05,
+                 infer_safe_reorder_box_kernel_m=(1.8, 4.2),
     ):
         self.ann_file = ann_file
         if self.ann_file:
@@ -111,6 +117,14 @@ class SSR(MVXTwoStageDetector):
         self.wm_latent_noise_weights = tuple(float(x) for x in wm_latent_noise_weights)
         if len(self.wm_latent_noise_weights) != 3:
             raise ValueError('wm_latent_noise_weights must contain 3 values: [struct, noise, kl].')
+        self.infer_safe_reorder = bool(infer_safe_reorder)
+        self.infer_safe_reorder_use_box = bool(infer_safe_reorder_use_box)
+        self.infer_safe_reorder_risk_weight = max(float(infer_safe_reorder_risk_weight), 0.0)
+        self.infer_safe_reorder_cmd_penalty = max(float(infer_safe_reorder_cmd_penalty), 0.0)
+        self.infer_safe_reorder_dev_weight = max(float(infer_safe_reorder_dev_weight), 0.0)
+        self.infer_safe_reorder_box_kernel_m = tuple(float(x) for x in infer_safe_reorder_box_kernel_m)
+        if len(self.infer_safe_reorder_box_kernel_m) != 2:
+            raise ValueError('infer_safe_reorder_box_kernel_m must contain 2 values: (w, l).')
 
         if self.latent_world_model is not None:
             self.latent_world_model = build_transformer_layer_sequence(self.latent_world_model)
@@ -233,6 +247,116 @@ class SSR(MVXTwoStageDetector):
         diff = torch.abs(pred - target) * mask_expand
         denom = mask_expand.sum().clamp_min(eps)
         return diff.sum() / denom
+
+    @staticmethod
+    def _sample_map_at_traj(traj_xy, risk_map, pc_range):
+        """Sample map values at trajectories with bilinear interpolation."""
+        if traj_xy.dim() != 3:
+            return None
+        if risk_map is None:
+            return None
+        if risk_map.dim() == 2:
+            risk_in = risk_map[None, None, ...]
+        elif risk_map.dim() == 3:
+            risk_in = risk_map[None, ...]
+        elif risk_map.dim() == 4:
+            risk_in = risk_map
+        else:
+            return None
+        if risk_in.size(1) != 1:
+            risk_in = risk_in[:, :1, ...]
+
+        x_min, y_min, _, x_max, y_max, _ = [float(x) for x in pc_range]
+        m, t, _ = traj_xy.shape
+        risk_rep = risk_in.repeat(m, 1, 1, 1)
+        x = (traj_xy[..., 0] - x_min) / max(x_max - x_min, 1e-6)
+        y = (traj_xy[..., 1] - y_min) / max(y_max - y_min, 1e-6)
+        x = x * 2.0 - 1.0
+        y = y * 2.0 - 1.0
+        grid = torch.stack([x, y], dim=-1).unsqueeze(2)  # (M, T, 1, 2)
+        sampled = F.grid_sample(risk_rep, grid, align_corners=True)  # (M,1,T,1)
+        return sampled.squeeze(1).squeeze(-1)  # (M, T)
+
+    def _sample_box_map_at_traj(self, traj_xy, risk_map, pc_range):
+        """Approximate box risk by max-pooling map around ego footprint."""
+        if risk_map is None:
+            return None
+        if risk_map.dim() == 2:
+            risk_in = risk_map[None, None, ...]
+        elif risk_map.dim() == 3:
+            risk_in = risk_map[None, ...]
+        elif risk_map.dim() == 4:
+            risk_in = risk_map
+        else:
+            return None
+
+        bev_w = max(int(getattr(self.pts_bbox_head, 'bev_w', 0)), 1)
+        bev_h = max(int(getattr(self.pts_bbox_head, 'bev_h', 0)), 1)
+        real_w = max(float(getattr(self.pts_bbox_head, 'real_w', 1.0)), 1e-6)
+        real_h = max(float(getattr(self.pts_bbox_head, 'real_h', 1.0)), 1e-6)
+        if bev_w <= 1 or bev_h <= 1:
+            return self._sample_map_at_traj(traj_xy, risk_in, pc_range)
+
+        dx = real_w / max(float(bev_w - 1), 1.0)
+        dy = real_h / max(float(bev_h - 1), 1.0)
+        box_w, box_l = self.infer_safe_reorder_box_kernel_m
+        kx = max(int(round(box_w / max(dx, 1e-6))), 1)
+        ky = max(int(round(box_l / max(dy, 1e-6))), 1)
+        if kx % 2 == 0:
+            kx += 1
+        if ky % 2 == 0:
+            ky += 1
+        risk_box = F.max_pool2d(
+            risk_in, kernel_size=(ky, kx), stride=1, padding=(ky // 2, kx // 2))
+        return self._sample_map_at_traj(traj_xy, risk_box, pc_range)
+
+    def _select_safe_mode_idx(self, ego_fut_preds, ego_fut_cmd, risk_map):
+        """Test-time safety reordering over trajectory modes."""
+        if ego_fut_cmd is None:
+            return 0, 0
+        nonzero = torch.nonzero(ego_fut_cmd > 0.5, as_tuple=False)
+        if nonzero.numel() > 0:
+            cmd_idx = int(nonzero[0, 0].item())
+        else:
+            cmd_idx = int(torch.argmax(ego_fut_cmd).item())
+
+        if (not self.infer_safe_reorder) or risk_map is None:
+            return cmd_idx, cmd_idx
+        if ego_fut_preds.dim() != 3 or ego_fut_preds.size(0) <= 1:
+            return cmd_idx, cmd_idx
+
+        pc_range = getattr(self.pts_bbox_head, 'pc_range', None)
+        if pc_range is None or len(pc_range) < 6:
+            return cmd_idx, cmd_idx
+
+        traj_abs = ego_fut_preds.cumsum(dim=-2)
+        if self.infer_safe_reorder_use_box:
+            risk_vals = self._sample_box_map_at_traj(traj_abs, risk_map, pc_range)
+        else:
+            risk_vals = self._sample_map_at_traj(traj_abs, risk_map, pc_range)
+        if risk_vals is None:
+            return cmd_idx, cmd_idx
+
+        risk_mean = risk_vals.mean(dim=1)
+        risk_max = risk_vals.max(dim=1)[0]
+        risk_score = 0.7 * risk_mean + 0.3 * risk_max
+
+        cmd_penalty = torch.zeros_like(risk_score)
+        if cmd_idx < cmd_penalty.numel():
+            cmd_penalty[:] = self.infer_safe_reorder_cmd_penalty
+            cmd_penalty[cmd_idx] = 0.0
+
+        end_pts = traj_abs[:, -1, :]
+        cmd_end = end_pts[cmd_idx]
+        end_dev = torch.norm(end_pts - cmd_end[None, :], dim=-1)
+
+        total = (
+            self.infer_safe_reorder_risk_weight * risk_score
+            + cmd_penalty
+            + self.infer_safe_reorder_dev_weight * end_dev
+        )
+        best_idx = int(torch.argmin(total).item())
+        return best_idx, cmd_idx
 
     def extract_img_feat(self, img, img_metas, len_queue=None):
         """Extract features of images."""
@@ -645,8 +769,14 @@ class SSR(MVXTwoStageDetector):
         bbox_results = []
         for i in range(len(outs['ego_fut_preds'])):
             bbox_result=dict()
-            bbox_result['ego_fut_preds'] = outs['ego_fut_preds'][i].cpu()
+            pred_i = outs['ego_fut_preds'][i]
+            risk_i = outs['risk_map'][i] if ('risk_map' in outs and outs['risk_map'] is not None) else None
+            cmd_i = ego_fut_cmd[i, 0, 0] if ego_fut_cmd is not None else None
+            select_idx, cmd_idx = self._select_safe_mode_idx(pred_i, cmd_i, risk_i)
+            bbox_result['ego_fut_preds'] = pred_i.cpu()
             bbox_result['ego_fut_cmd'] = ego_fut_cmd.cpu()
+            bbox_result['ego_fut_select_idx'] = int(select_idx)
+            bbox_result['ego_fut_cmd_idx'] = int(cmd_idx)
             bbox_results.append(bbox_result)
 
         assert len(bbox_results) == 1, 'only support batch_size=1 now'
@@ -666,7 +796,10 @@ class SSR(MVXTwoStageDetector):
             ego_fut_trajs = ego_fut_trajs[0, 0]
 
             ego_fut_cmd = ego_fut_cmd[0, 0, 0]
-            ego_fut_cmd_idx = torch.nonzero(ego_fut_cmd)[0, 0]
+            if 'ego_fut_select_idx' in bbox_result:
+                ego_fut_cmd_idx = int(bbox_result['ego_fut_select_idx'])
+            else:
+                ego_fut_cmd_idx = int(torch.nonzero(ego_fut_cmd)[0, 0].item())
 
             ego_fut_pred = ego_fut_preds[ego_fut_cmd_idx]
             ego_fut_pred = ego_fut_pred.cumsum(dim=-2)

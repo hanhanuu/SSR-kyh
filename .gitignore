@@ -1,12 +1,15 @@
 # Python caches
 __pycache__/
+**/__pycache__/
 *.py[cod]
+*.swp
 
 # VSCode
 .vscode/
 
 # Training outputs / logs / checkpoints
-work_dirs/
+work_dirs/*
+!work_dirs/paper_metrics_all_ema_unified.csv
 ckpts/
 *.pth
 *.log
@@ -15,7 +18,10 @@ ckpts/
 # Data symlinks / datasets
 data/nuscenes
 data/nuscenes.bak
+data/corruptions/
+data/nuscenes_corruptions/
 nuscenes
+test/
 
 # Misc
 *.tmp
